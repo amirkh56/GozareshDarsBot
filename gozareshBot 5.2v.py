@@ -6,7 +6,12 @@ from datetime import datetime
 import logging
 import re
 import jdatetime
-import pytz # برای مدیریت دقیق‌تر منطقه زمانی
+import pytz
+
+# اضافه کردن کتابخانه‌های مورد نیاز برای Webhook
+import os
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from threading import Thread
 
 # توکن ربات شما
 TOKEN = '7972800273:AAFSPtrNsnzwdvkzzIIosNgOj3fKDf_z7W8'
@@ -14,10 +19,18 @@ TOKEN = '7972800273:AAFSPtrNsnzwdvkzzIIosNgOj3fKDf_z7W8'
 # شناسه کانال خصوصی شما
 CHANNEL_ID = -1002821806086
 
+# اطلاعات Webhook
+# آدرس URL سرور شما که تلگرام برای ارسال آپدیت‌ها استفاده می‌کنه.
+# باید از HTTPS استفاده بشه.
+WEBHOOK_URL = "https://your-domain.com/your_webhook_path"
+# پورت مورد نظر شما برای Webhook
+PORT = 8443
+
+
 # --- توابع کمکی ---
 def convert_fa_numbers_to_en(text: str) -> str:
     """اعداد فارسی را در یک رشته به اعداد انگلیسی تبدیل می‌کند."""
-    persian_digits = "۰۱۲۳۴۵۶۷۸۹"
+    persian_digits = "۰۱۲۳۴۴۵۶۷۸۹"
     english_digits = "0123456789"
     translation_table = str.maketrans(persian_digits, english_digits)
     return text.translate(translation_table)
@@ -43,7 +56,6 @@ class Report(Base):
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
     report_text = Column(Text, nullable=False)
-    # Changed default to datetime.utcnow() to store UTC time
     timestamp = Column(DateTime, default=datetime.utcnow) 
 
     user = relationship("User", back_populates="reports")
@@ -84,12 +96,11 @@ USER_INFO_KEYBOARD = ReplyKeyboardMarkup(
 )
 
 # --- توابع هندلر (Handler Functions) ---
+# (این بخش بدون تغییر است، فقط برای یادآوری اینجا قرار داده شده)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     هندلر دستور /start.
-    پیام خوش‌آمدگویی اولیه یا منوی اصلی را نمایش می‌دهد.
-    آیدی کاربر را در پایگاه داده ذخیره می‌کند.
     """
     user_data = update.effective_user
     user_id = user_data.id
@@ -211,7 +222,6 @@ async def get_register_phone_number(update: Update, context: ContextTypes.DEFAUL
 async def report_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     شروع فرآیند ثبت گزارش.
-    اطلاعات کاربر را از پایگاه داده بررسی می‌کند.
     """
     session = Session()
     user_id = update.effective_user.id
@@ -236,8 +246,6 @@ async def report_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 async def get_report_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     متن گزارش کار را دریافت کرده و تمام اطلاعات را در پایگاه داده ذخیره می‌کند.
-    سپس گزارش را به کانال خصوصی ارسال می‌کند.
-    مکالمه را به پایان می‌رساند.
     """
     report_text = update.message.text.strip()
     if len(report_text) < 5:
@@ -275,7 +283,7 @@ async def get_report_text(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await update.effective_chat.send_message("❗️مشکلی در ارسال گزارش به کانال پیش اومد. لطفاً به ادمین اطلاع بدید.")
 
     else:
-        await update.effective_chat.send_message("متاسفانه مشکلی در ثبت گزارش پیش اومد. لطفatoاً دوباره /start رو بزنید.")
+        await update.effective_chat.send_message("متاسفانه مشکلی در ثبت گزارش پیش اومد. لطفاً دوباره /start رو بزنید.")
         print(f"Error: User DB ID not found for report submission.")
     session.close()
 
@@ -300,17 +308,11 @@ async def show_my_reports(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if recent_reports:
         reports_text.append("📄 **آخرین گزارش‌های شما:**\n")
-        # Define Tehran timezone
         tehran_tz = pytz.timezone('Asia/Tehran')
 
         for i, report in enumerate(recent_reports):
-            # Convert naive datetime from DB to timezone-aware UTC
             utc_dt = report.timestamp.replace(tzinfo=pytz.utc)
-            
-            # Convert UTC datetime to Tehran local time
             tehran_dt = utc_dt.astimezone(tehran_tz)
-            
-            # Convert Gregorian (tehran_dt) to Jalaali (persian_timestamp)
             j_date = jdatetime.datetime.fromgregorian(datetime=tehran_dt)
             persian_timestamp = j_date.strftime("%Y/%m/%d %H:%M:%S")
             
@@ -412,7 +414,6 @@ async def get_edit_phone_number(update: Update, context: ContextTypes.DEFAULT_TY
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     هندلر دکمه لغو یا دستور /cancel.
-    مکالمه را لغو کرده و به منوی اصلی باز می‌گردد.
     """
     await update.effective_chat.send_message("عملیات لغو شد. ❌")
     
@@ -454,8 +455,20 @@ def main() -> None:
     )
 
     application.add_handler(conv_handler)
+    
+    # --- بخش جدید Webhook ---
+    async def run() -> None:
+        """اجرای ربات با استفاده از Webhook."""
+        # اگر در یک محیط مثل Heroku یا سرویس‌های ابری هستید، پورت از متغیر محیطی گرفته می‌شود.
+        # در غیر این صورت، از پورت پیش‌فرض 8443 استفاده می‌کنیم.
+        port = int(os.environ.get("PORT", PORT))
 
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+        # ایجاد یک سرور موقت برای شنیدن درخواست‌های تلگرام
+        # این بخش باید در سرور واقعی با یک سرور HTTP قدرتمندتر (مثل gunicorn) جایگزین شود
+        # همچنین برای استفاده از HTTPS به گواهینامه SSL نیاز دارید.
+        await application.run_webhook(listen="0.0.0.0", port=port, url_path=WEBHOOK_URL, webhook_url=f"https://{os.environ.get('WEBHOOK_HOST', 'your-domain.com')}/", cert=None)
+
+    application.run(run())
 
 if __name__ == "__main__":
     main()

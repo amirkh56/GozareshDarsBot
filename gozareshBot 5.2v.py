@@ -22,7 +22,7 @@ CHANNEL_ID = -1002821806086
 # اطلاعات Webhook
 # آدرس URL سرور شما که تلگرام برای ارسال آپدیت‌ها استفاده می‌کنه.
 # باید از HTTPS استفاده بشه.
-WEBHOOK_URL = "https://your-domain.com/your_webhook_path"
+WEBHOOK_URL = "https://gozareshdarsbot.onrender.com"
 # پورت مورد نظر شما برای Webhook
 PORT = 8443
 
